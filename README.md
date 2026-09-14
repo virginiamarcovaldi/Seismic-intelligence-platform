@@ -1,10 +1,10 @@
 # CAMERA CAFE — Seismic Intelligence Platform
 
-Piattaforma di monitoraggio sismico distribuita e containerizzata. Un simulatore genera stream sismici in tempo reale che vengono inoltrati da un broker a tre repliche di processore, le quali eseguono analisi FFT, classificano gli eventi (terremoto / esplosione convenzionale / evento nucleare-simile) e persistono le rilevazioni uniche su PostgreSQL. Un gateway espone un unico entrypoint API con load balancing round-robin basato su health-check, e una dashboard React mostra il tutto in tempo reale.
+A distributed, containerized seismic monitoring platform. A simulator generates real-time seismic streams that are forwarded by a broker to three processor replicas, which run FFT analysis, classify events (earthquake / conventional explosion / nuclear-like) and persist unique detections into PostgreSQL. A gateway exposes a single API entrypoint with health-checked round-robin load balancing, and a React dashboard visualizes everything in real time.
 
-L'architettura rispetta un vincolo di "regione neutrale": i servizi di routing (broker, gateway, frontend) non eseguono mai analisi di intelligence, che è confinata ai servizi di elaborazione/dati (simulator, processor, PostgreSQL).
+The architecture enforces a "neutral region" constraint: routing services (broker, gateway, frontend) never perform intelligence processing, which is confined to the processing/data services (simulator, processors, PostgreSQL).
 
-## Architettura
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -33,93 +33,93 @@ flowchart LR
     SIM -->|SSE control| P3
 ```
 
-- **camera_cafe_neutral_region**: broker, gateway, frontend (solo routing/forwarding)
-- **camera_cafe_processing_region**: simulator, processor-1/2/3, postgres (analisi FFT, classificazione, persistenza)
+- **camera_cafe_neutral_region**: broker, gateway, frontend (routing/forwarding only)
+- **camera_cafe_processing_region**: simulator, processor-1/2/3, postgres (FFT analysis, classification, persistence)
 
-## Componenti
+## Components
 
-| Servizio | Ruolo | Porta | Tecnologia |
+| Service | Role | Port | Technology |
 | --- | --- | --- | --- |
-| `simulator` | Genera stream sensori e comandi di controllo (immagine fornita) | 8080 | `seismic-signal-simulator:multiarch_v1` |
-| `broker` | Fan-out WebSocket dei dati sensore verso i processor | 9000 | Python 3.12, FastAPI, websockets, httpx |
-| `processor-1/2/3` | Analisi FFT, classificazione eventi, deduplicazione, persistenza | 9001 (interna) | Python 3.12, FastAPI, NumPy, asyncpg, websockets, httpx |
-| `gateway` | Entrypoint API unico, health-check + round-robin sui processor, gestione API key | 8081 | Python 3.12, FastAPI, httpx, asyncpg |
-| `frontend` | Dashboard operativa SPA | 3000 (→80) | React 18, Vite, Nginx |
-| `postgres` | Storage eventi rilevati e metadati gateway | 5432 | PostgreSQL |
+| `simulator` | Generates sensor streams and control commands (provided image) | 8080 | `seismic-signal-simulator:multiarch_v1` |
+| `broker` | Fans out sensor data via WebSocket to the processors | 9000 | Python 3.12, FastAPI, websockets, httpx |
+| `processor-1/2/3` | FFT analysis, event classification, deduplication, persistence | 9001 (internal) | Python 3.12, FastAPI, NumPy, asyncpg, websockets, httpx |
+| `gateway` | Single API entrypoint, health-check + round-robin over processors, API key management | 8081 | Python 3.12, FastAPI, httpx, asyncpg |
+| `frontend` | Operator dashboard SPA | 3000 (→80) | React 18, Vite, Nginx |
+| `postgres` | Storage for detected events and gateway metadata | 5432 | PostgreSQL |
 
-### Classificazione eventi
+### Event classification
 
-I processor applicano soglie di ampiezza/SNR ed eseguono FFT su finestre scorrevoli per sensore, classificando la frequenza dominante in:
+Processors apply amplitude/SNR thresholds and run FFT over per-sensor sliding windows, classifying the dominant frequency as:
 
-- **bassa frequenza** → terremoto (evento naturale)
-- **media frequenza** → esplosione convenzionale
-- **alta frequenza** → evento nucleare-simile
+- **low frequency** → earthquake (natural event)
+- **mid frequency** → conventional explosion
+- **high frequency** → nuclear-like event
 
-Gli eventi vengono deduplicati tra le repliche con una chiave deterministica prima di essere scritti su PostgreSQL.
+Events are deduplicated across replicas with a deterministic key before being written to PostgreSQL.
 
-### Resilienza
+### Resilience
 
-- Ogni processor ascolta lo stream di controllo SSE del simulatore e termina immediatamente su `{"command":"SHUTDOWN"}`, simulando un guasto di datacenter.
-- La `restart policy` di Docker (`restart: always`) ripristina automaticamente le repliche terminate.
-- Il gateway esegue health-check periodici (intervallo 1s, timeout 1.5s) e instrada in round-robin solo sulle repliche sane; in caso di errore su una richiesta esegue failover immediato e ritorna `503` solo se nessuna replica è disponibile.
+- Each processor listens to the simulator's SSE control stream and terminates immediately on `{"command":"SHUTDOWN"}`, simulating a datacenter failure.
+- Docker's `restart policy` (`restart: always`) automatically recovers terminated replicas.
+- The gateway runs periodic health checks (1s interval, 1.5s timeout) and routes round-robin only over healthy replicas; on a request failure it performs immediate failover and returns `503` only when no replica is available.
 
-## Avvio rapido
+## Quick start
 
-Requisiti: Docker e Docker Compose.
+Requirements: Docker and Docker Compose.
 
 ```bash
 cd source
 docker compose up --build
 ```
 
-Servizi esposti sull'host:
+Services exposed on the host:
 
-| URL | Descrizione |
+| URL | Description |
 | --- | --- |
 | http://localhost:3000 | Dashboard |
 | http://localhost:8081 | Gateway API |
 | http://localhost:9000 | Broker |
-| http://localhost:8080 | Simulatore |
+| http://localhost:8080 | Simulator |
 | localhost:5432 | PostgreSQL (`seismic` / `seismic123`) |
 
-Per fermare e rimuovere i container:
+To stop and remove the containers:
 
 ```bash
 docker compose down
 ```
 
-Per rimuovere anche il volume dei dati persistiti:
+To also remove the persisted data volume:
 
 ```bash
 docker compose down -v
 ```
 
-## API principali (Gateway)
+## Main API (Gateway)
 
-Tutte le chiamate (tranne `/health`) richiedono una API key valida, passata come header `X-API-Key` o parametro di query `api_key`.
+All calls (except `/health`) require a valid API key, passed as the `X-API-Key` header or the `api_key` query parameter.
 
-| Metodo | Endpoint | Descrizione |
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| GET | `/health` | Stato del gateway e numero di repliche sane |
-| GET | `/api/events` | Query storica eventi con filtri (`sensor_id`, `event_type`, `region`, `since`) e paginazione |
-| GET | `/api/events/stream` | Stream SSE live degli eventi rilevati |
-| GET | `/api/sensors` | Elenco sensori monitorati |
-| GET | `/api/stats` | Statistiche aggregate |
-| GET | `/api/replicas` | Stato di salute di ogni replica processor |
-| GET | `/api/auth/me` | Informazioni sulla API key corrente |
-| GET/POST/DELETE | `/api/admin/keys` | Gestione API key (ruolo admin) |
-| GET | `/api/admin/audit` | Log di audit delle chiamate |
+| GET | `/health` | Gateway status and number of healthy replicas |
+| GET | `/api/events` | Historical event query with filters (`sensor_id`, `event_type`, `region`, `since`) and pagination |
+| GET | `/api/events/stream` | Live SSE stream of detected events |
+| GET | `/api/sensors` | List of monitored sensors |
+| GET | `/api/stats` | Aggregated statistics |
+| GET | `/api/replicas` | Health status of each processor replica |
+| GET | `/api/auth/me` | Information about the current API key |
+| GET/POST/DELETE | `/api/admin/keys` | API key management (admin role) |
+| GET | `/api/admin/audit` | Audit log of API calls |
 
-Una API key admin di bootstrap è configurata via variabile d'ambiente `BOOTSTRAP_ADMIN_KEY` in `docker-compose.yml` (solo per sviluppo/valutazione — **da cambiare in un ambiente reale**).
+A bootstrap admin API key is configured via the `BOOTSTRAP_ADMIN_KEY` environment variable in `docker-compose.yml` (development/evaluation only — **change it in a real environment**).
 
-## Struttura del repository
+## Repository structure
 
 ```
 .
-├── Student_doc.md        # Specifica tecnica completa (user stories, container, endpoint, schema DB)
-├── input.md               # Descrizione di sistema e user stories originali
-├── booklets/               # Materiale di presentazione (mockup, slide)
-└── source/                 # Codice sorgente ed infrastruttura
+├── Student_doc.md        # Full technical spec (user stories, containers, endpoints, DB schema)
+├── input.md               # Original system description and user stories
+├── booklets/               # Presentation material (mockups, slides)
+└── source/                 # Source code and infrastructure
     ├── docker-compose.yml
     ├── broker/
     ├── gateway/
@@ -128,16 +128,16 @@ Una API key admin di bootstrap è configurata via variabile d'ambiente `BOOTSTRA
     └── db/
 ```
 
-Documentazione di riferimento più dettagliata (user stories, endpoint completi, schema del database, policy di rete) in [`Student_doc.md`](./Student_doc.md).
+More detailed reference documentation (user stories, full endpoint list, database schema, network policy) is in [`Student_doc.md`](./Student_doc.md).
 
-## Variabili d'ambiente principali
+## Main environment variables
 
-Configurate in `source/docker-compose.yml`, tra cui:
+Configured in `source/docker-compose.yml`, including:
 
 - **simulator**: `SAMPLING_RATE_HZ`, `AUTO_SHUTDOWN_ENABLED`, `AUTO_SHUTDOWN_MIN_SECONDS`, `AUTO_SHUTDOWN_MAX_SECONDS`
 - **processor**: `WINDOW_SIZE`, `ANALYZE_EVERY`, `MIN_ANALYSIS_FREQ_HZ`, `AMPLITUDE_THRESHOLD`, `SNR_THRESHOLD`, `TIME_BUCKET_SECONDS`
 - **gateway**: `PROCESSOR_URLS`, `HEALTH_CHECK_INTERVAL`, `HEALTH_CHECK_TIMEOUT`, `KEY_HASH_SECRET`, `BOOTSTRAP_ADMIN_KEY`
 
-## Licenza
+## License
 
-Da definire.
+To be defined.
